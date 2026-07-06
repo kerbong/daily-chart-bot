@@ -33,7 +33,19 @@ def fetch_weekly(ticker: str):
         ticker, period="2y", interval="1wk",
         progress=False, auto_adjust=True,
     )
+    # 최신 yfinance는 컬럼이 MultiIndex(예: ('Close','GC=F'))로 오는 경우가 있음.
+    # 첫 번째 레벨(Open/High/Low/Close)만 남겨 평탄화한다.
+    if isinstance(df.columns, __import__("pandas").MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     return df.dropna()
+
+
+def _scalar(v):
+    """Series/배열이 와도 안전하게 단일 float로 변환."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(v.iloc[0]) if hasattr(v, "iloc") else float(v[0])
 
 
 def make_candles(ax, df):
@@ -43,8 +55,8 @@ def make_candles(ax, df):
     width = 5  # 캔들 몸통 폭(일 단위)
     for i in range(len(df)):
         xi = x[i]
-        oi = float(o.iloc[i]); hi = float(h.iloc[i])
-        li = float(l.iloc[i]); ci = float(c.iloc[i])
+        oi = _scalar(o.iloc[i]); hi = _scalar(h.iloc[i])
+        li = _scalar(l.iloc[i]); ci = _scalar(c.iloc[i])
         up = ci >= oi
         color = "#d93025" if up else "#1a73e8"  # 한국식: 상승 빨강, 하락 파랑
         ax.plot([xi, xi], [li, hi], color=color, linewidth=0.8, zorder=1)
@@ -72,8 +84,8 @@ def build_figure():
             if len(df) < 2:
                 raise ValueError("데이터 없음 (빈 응답)")
             make_candles(ax, df)
-            last = float(df["Close"].iloc[-1])
-            prev = float(df["Close"].iloc[-2])
+            last = _scalar(df["Close"].iloc[-1])
+            prev = _scalar(df["Close"].iloc[-2])
             pct = (last / prev - 1) * 100
             ax.set_title(f"{name}   {last:,.1f}  ({pct:+.2f}%)", fontsize=11)
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%y/%m"))
