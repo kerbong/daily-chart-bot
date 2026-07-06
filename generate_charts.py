@@ -49,7 +49,7 @@ def _scalar(v):
 
 
 def make_candles(ax, df):
-    """간단한 캔들 차트를 축에 그린다."""
+    """캔들 차트 + 이동평균선(10/20/30주)을 축에 그린다."""
     o, h, l, c = (df["Open"], df["High"], df["Low"], df["Close"])
     x = mdates.date2num(df.index.to_pydatetime())
     width = 5  # 캔들 몸통 폭(일 단위)
@@ -64,6 +64,20 @@ def make_candles(ax, df):
             (xi - width / 2, min(oi, ci)), width, abs(ci - oi) or hi * 1e-4,
             facecolor=color, edgecolor=color, zorder=2,
         ))
+
+    # ── 이동평균선 (주봉 기준) ─────────────────────────────
+    ma_config = [
+        (10, "#f9a825", "10주"),   # 주황
+        (20, "#2e7d32", "20주"),   # 초록
+        (30, "#6a1b9a", "30주"),   # 보라
+    ]
+    close = c.astype(float)
+    for period, mcolor, label in ma_config:
+        if len(df) >= period:
+            ma = close.rolling(period).mean()
+            ax.plot(x, ma.values, color=mcolor, linewidth=1.3,
+                    label=label, zorder=3)
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.6)
 
 
 def build_figure():
