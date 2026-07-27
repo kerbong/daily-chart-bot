@@ -288,6 +288,74 @@ def _split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
     return chunks
 
 
+def build_speech_text(digest: dict) -> str:
+    """음성으로 읽어줄 원고. 링크·기호는 빼고 자연스럽게 읽히도록 구성한다."""
+    today = dt.datetime.now()
+    lines = [f"{today.month}월 {today.day}일, 오늘의 뉴스 브리핑입니다."]
+
+    def section(intro: str, items: list[dict]) -> None:
+        if not items:
+            lines.append(f"{intro} 오늘은 전해드릴 소식이 없습니다.")
+            return
+        lines.append(intro)
+        for i, it in enumerate(items, 1):
+            summary = it["summary"].rstrip()
+            if not summary.endswith((".", "!", "?")):
+                summary += "."
+            lines.append(f"{i}. {it['headline']}. {summary}")
+
+    section("먼저 부동산 소식입니다.", digest.get("realty", []))
+    section("다음은 오늘의 주요 뉴스입니다.", digest.get("general", []))
+    lines.append("이상입니다. 좋은 하루 보내세요.")
+    return "\n".join(lines)
+
+
+def synthesize(text: str, out_dir: str) -> tuple[str, bool]:
+    """edge-tts 로 음성을 만든다. (파일경로, ogg여부) 반환."""
+    import asyncio
+    import shutil
+    import subprocess
+
+    import edge_tts
+
+    voice = os.environ.get("TTS_VOICE", "ko-KR-SunHiNeural")
+    mp3_path = os.path.join(out_dir, "digest.mp3")
+    asyncio.run(edge_tts.Communicate(text, voice).save(mp3_path))
+
+    # 텔레그램 음성 메시지(sendVoice)는 OGG/OPUS 를 요구한다.
+    # ffmpeg 가 있으면 변환하고, 없으면 mp3 를 오디오 파일로 보낸다.
+    if shutil.which("ffmpeg"):
+        ogg_path = os.path.join(out_dir, "digest.ogg")
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "32k", ogg_path],
+            capture_output=True,
+        )
+        if proc.returncode == 0:
+            return ogg_path, True
+        print(f"[warn] ffmpeg 변환 실패, mp3 로 전송합니다: {proc.stderr[-300:]!r}")
+    else:
+        print("[warn] ffmpeg 없음 — mp3 오디오로 전송합니다.")
+    return mp3_path, False
+
+
+def send_telegram_audio(path: str, is_ogg: bool) -> None:
+    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    method, field = ("sendVoice", "voice") if is_ogg else ("sendAudio", "audio")
+    data = {"chat_id": chat_id}
+    if not is_ogg:
+        data["title"] = f"뉴스 브리핑 {dt.datetime.now():%Y-%m-%d}"
+    with open(path, "rb") as f:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/{method}",
+            data=data,
+            files={field: (os.path.basename(path), f)},
+            timeout=120,
+        )
+    r.raise_for_status()
+    print(f"음성 전송 완료 ({method})")
+
+
 def send_telegram(text: str) -> None:
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
@@ -307,7 +375,20 @@ def send_telegram(text: str) -> None:
 
 
 if __name__ == "__main__":
+    import tempfile
+
     realty = collect(REALTY_FEEDS)
     general = collect(GENERAL_FEEDS)
     print(f"수집: 부동산 {len(realty)}건 / 일반 {len(general)}건")
-    send_telegram(render(summarize(realty, general)))
+
+    digest = summarize(realty, general)
+    send_telegram(render(digest))     # 1) 텍스트 (링크 포함)
+
+    # 2) 음성. 실패하더라도 이미 보낸 텍스트가 있으므로 작업 전체를 실패시키지 않는다.
+    if os.environ.get("ENABLE_TTS", "1") != "0":
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path, is_ogg = synthesize(build_speech_text(digest), tmp)
+                send_telegram_audio(path, is_ogg)
+        except Exception as e:
+            print(f"[warn] 음성 전송 실패(텍스트는 정상 전송됨): {type(e).__name__}: {e}")

@@ -11,21 +11,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Install Korean fonts
+      - name: Install Korean fonts and ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-nanum
+          sudo apt-get install -y fonts-nanum ffmpeg
           sudo fc-cache -fv
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install yfinance matplotlib requests
+        run: pip install yfinance matplotlib requests edge-tts
 
       - name: Generate and send charts
         env:

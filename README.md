@@ -4,6 +4,7 @@
 
 1. 금·은·비트코인·나스닥·S&P500·코스피 **주봉 차트** (`generate_charts.py`)
 2. **부동산 주요 뉴스 + 부동산 외 오늘의 핵심 뉴스** 요약 (`news_digest.py`)
+3. 그 요약을 읽어주는 **음성 메시지** (같은 스크립트)
 
 뉴스는 구글 뉴스 RSS와 한국경제 부동산 RSS에서 제목·요약·링크만 모은 뒤,
 Gemini API(무료 티어)로 중요한 것만 골라 다시 요약합니다. GitHub Actions로 실행됩니다.
@@ -50,6 +51,13 @@ git push -u origin main
   `GOOGLE_NEWS.format(q=quote("검색어"))` 형태로 키워드를 자유롭게 추가할 수 있습니다.
 - `MAX_AGE_HOURS` : 몇 시간 이내 기사만 볼지 (기본 30시간)
 - `PROMPT` : 몇 건을 고를지, 어떤 기사를 제외할지 등 요약 기준
+
+## 음성 메시지
+`edge-tts`(마이크로소프트 음성, 무료·키 불필요)로 요약을 읽어 텔레그램 음성 메시지로 보냅니다.
+- 목소리 변경: 워크플로에 `TTS_VOICE` 환경변수 추가
+  (`ko-KR-SunHiNeural` 기본 / `ko-KR-InJoonNeural` 남성 / `ko-KR-HyunsuMultilingualNeural`)
+- 끄기: `ENABLE_TTS: "0"`
+- 음성 생성이 실패해도 텍스트 메시지는 이미 전송된 뒤라 영향받지 않습니다.
 
 ## 참고
 - 스케줄 실행은 GitHub 서버 부하에 따라 몇 분~수십 분 지연될 수 있습니다.
