@@ -26,7 +26,7 @@ GENERAL_FEEDS = [
 ]
 
 MAX_AGE_HOURS = 30      # 이 시간보다 오래된 기사는 버림
-MAX_ITEMS = 30          # 섹션별로 Claude에 넘길 최대 기사 수
+MAX_ITEMS = 45          # 섹션별로 요약 모델에 넘길 최대 기사 수
 
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -126,10 +126,11 @@ PROMPT = """아래는 오늘 국내 뉴스 RSS에서 모은 기사 목록입니�
 
 다음 규칙으로 정리해 주세요.
 
-- realty: 부동산 관련 기사 중 **중요한 것 4~6건**. 정책·규제·금리·공급·거래량·가격 동향처럼
+- realty: 부동산 관련 기사 중 **중요한 것 8~10건**. 정책·규제·금리·공급·거래량·가격 동향처럼
   실제 의사결정에 영향을 주는 내용을 우선하고, 단순 분양 광고성 기사나 지역 소식은 제외합니다.
-- general: 부동산을 **제외한** 오늘의 핵심 뉴스 **4~6건**. 거시경제·금융시장·정치·산업·국제
+- general: 부동산을 **제외한** 오늘의 핵심 뉴스 **8~10건**. 거시경제·금융시장·정치·산업·국제
   등에서 파급력이 큰 것 위주로 고르고, 연예·스포츠·사건사고 단신은 제외합니다.
+- 중요한 순서대로 정렬합니다. 쓸 만한 기사가 부족하면 억지로 채우지 말고 있는 만큼만 넣습니다.
 - headline: 원문 제목을 그대로 쓰지 말고, 핵심이 드러나게 한 줄(30자 내외)로 다시 씁니다.
 - summary: 왜 중요한지가 드러나게 1~2문장으로 요약합니다. 기사에 없는 내용은 지어내지 않습니다.
 - link: 해당 기사 원문 링크를 그대로 넣습니다.
@@ -270,21 +271,39 @@ def render(digest: dict) -> str:
     return "\n".join(parts)
 
 
+TELEGRAM_LIMIT = 3800   # 실제 한도는 4096자. 여유를 둔다.
+
+
+def _split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """줄 단위로 잘라 한 메시지가 한도를 넘지 않게 한다(HTML 태그가 쪼개지지 않도록)."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        if current and len(current) + len(line) + 1 > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_telegram(text: str) -> None:
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    r = requests.post(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        data={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": "true",
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
-    print("뉴스 전송 완료:", r.json().get("ok"))
+    for part in _split_message(text):
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            data={
+                "chat_id": chat_id,
+                "text": part,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+            timeout=60,
+        )
+        r.raise_for_status()
+    print("뉴스 전송 완료")
 
 
 if __name__ == "__main__":
