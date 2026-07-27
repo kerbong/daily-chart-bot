@@ -137,43 +137,115 @@ PROMPT = """아래는 오늘 국내 뉴스 RSS에서 모은 기사 목록입니�
 """
 
 
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# 위에서부터 차례로 시도한다 (모델 이름이 바뀌어도 알아서 넘어가도록).
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+    "gemini-2.0-flash",
+]
+
+
+def _error_message(r: requests.Response) -> str:
+    """구글 에러 응답에서 message 만 뽑아낸다."""
+    try:
+        return r.json()["error"]["message"][:300]
+    except Exception:
+        return r.text[:300]
+
+
+def list_available_models(api_key: str) -> list[str]:
+    """generateContent 를 지원하는 모델 이름 목록."""
+    try:
+        r = requests.get(f"{GEMINI_BASE}/models",
+                         headers={"x-goog-api-key": api_key}, timeout=30)
+        r.raise_for_status()
+        return [
+            m["name"].removeprefix("models/")
+            for m in r.json().get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+    except Exception as e:
+        print(f"[warn] 모델 목록 조회 실패: {e}")
+        return []
+
+
+def _call_gemini(model: str, api_key: str, prompt: str) -> requests.Response:
+    config = {
+        "responseMimeType": "application/json",
+        "responseSchema": SCHEMA,
+    }
+    # 2.5 계열은 기본으로 '생각'을 하는데, 그 토큰이 출력 한도를 잡아먹어
+    # 본문이 비어서 돌아오는 경우가 있다. 요약 작업엔 필요 없으므로 끈다.
+    if model.startswith("gemini-2.5"):
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+
+    return requests.post(
+        f"{GEMINI_BASE}/models/{model}:generateContent",
+        headers={"x-goog-api-key": api_key},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": config,
+        },
+        timeout=180,
+    )
+
+
+def _extract_json(data: dict, model: str) -> dict:
+    """응답에서 JSON 본문을 꺼낸다. 실패하면 원인을 담아 예외."""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        feedback = data.get("promptFeedback", {})
+        raise RuntimeError(
+            f"[{model}] 후보 응답 없음. promptFeedback={json.dumps(feedback, ensure_ascii=False)}")
+
+    cand = candidates[0]
+    parts = cand.get("content", {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts)
+    if not text.strip():
+        raise RuntimeError(
+            f"[{model}] 본문이 비어 있음. finishReason={cand.get('finishReason')} "
+            f"usage={json.dumps(data.get('usageMetadata', {}), ensure_ascii=False)}")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"[{model}] JSON 파싱 실패({e}): {text[:300]}")
+
+
 def summarize(realty: list[dict], general: list[dict]) -> dict:
     """Gemini API(무료 티어)로 요약. GEMINI_API_KEY 환경변수 필요."""
-    api_key = os.environ["GEMINI_API_KEY"]
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{model}:generateContent")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise SystemExit("GEMINI_API_KEY 가 비어 있습니다. 저장소 Secrets 를 확인하세요.")
 
     prompt = PROMPT.format(
         realty=_as_prompt_block(realty),
         general=_as_prompt_block(general),
     )
-    r = requests.post(
-        url,
-        headers={"x-goog-api-key": api_key},
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": SCHEMA,
-            },
-        },
-        timeout=120,
-    )
-    if r.status_code == 404:
-        raise SystemExit(
-            f"모델 '{model}' 을 쓸 수 없습니다. 아래 주소로 사용 가능한 모델을 확인한 뒤\n"
-            f"GEMINI_MODEL 환경변수로 지정하세요.\n"
-            f"https://generativelanguage.googleapis.com/v1beta/models?key=<API키>"
-        )
-    r.raise_for_status()
-    data = r.json()
 
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        raise RuntimeError(f"예상과 다른 응답: {json.dumps(data)[:500]}")
-    return json.loads(text)
+    forced = os.environ.get("GEMINI_MODEL")
+    models = [forced] if forced else list(FALLBACK_MODELS)
+
+    errors = []
+    for model in models:
+        print(f"[info] Gemini 호출: {model}")
+        r = _call_gemini(model, api_key, prompt)
+
+        if r.status_code in (404, 429):     # 모델 없음 / 한도 초과 → 다음 후보로
+            print(f"[warn] {model} HTTP {r.status_code}: {r.text[:400]}")
+            errors.append(f"{model}: HTTP {r.status_code} — {_error_message(r)}")
+            continue
+        if r.status_code >= 400:
+            raise SystemExit(f"[{model}] HTTP {r.status_code}: {r.text[:800]}")
+
+        return _extract_json(r.json(), model)
+
+    available = list_available_models(api_key)
+    hint = ("\n사용 가능한 모델: " + ", ".join(available[:15])) if available else \
+           "\n모델 목록도 조회되지 않았습니다 — API 키가 유효한지 확인하세요."
+    raise SystemExit("모든 모델 시도 실패:\n  " + "\n  ".join(errors) + hint)
 
 
 def render(digest: dict) -> str:
