@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import time
 import datetime as dt
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
@@ -141,11 +142,19 @@ PROMPT = """아래는 오늘 국내 뉴스 RSS에서 모은 기사 목록입니�
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 # 위에서부터 차례로 시도한다 (모델 이름이 바뀌어도 알아서 넘어가도록).
+# 조건: 무료 티어가 있고, 긴 기사 묶음을 요약할 수 있는 텍스트 모델.
+# gemini-2.5-flash 는 신규 사용자에게 더 이상 제공되지 않아 뺐다(404).
 FALLBACK_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-flash-latest",
-    "gemini-2.0-flash",
+    "gemini-3.5-flash",         # 무료 티어 + 검색 그라운딩 지원
+    "gemini-3.1-flash-lite",    # 더 싸고 빠른 예비
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash-lite",    # 구세대 최후 보루
 ]
+
+# 잠깐 붐비는 것뿐이므로 같은 모델로 몇 번 더 시도해 본다.
+RETRY_STATUSES = {429, 500, 502, 503}
+RETRIES_PER_MODEL = 3
+RETRY_BACKOFF = 20      # 초, 시도할 때마다 배로 늘린다
 
 
 def _error_message(r: requests.Response) -> str:
@@ -172,15 +181,29 @@ def list_available_models(api_key: str) -> list[str]:
         return []
 
 
-def _call_gemini(model: str, api_key: str, prompt: str) -> requests.Response:
+def _thinking_config(model: str) -> dict | None:
+    """모델 세대별로 '생각' 최소화 설정을 고른다.
+
+    생각 토큰이 출력 한도를 잡아먹어 본문이 비어 돌아오는 경우가 있는데,
+    기사 요약엔 깊은 추론이 필요 없다. 다만 설정 방식이 세대마다 다르다.
+    """
+    if model.startswith("gemini-3"):
+        return {"thinkingLevel": "minimal"}     # 3.x 는 끌 수 없고 최소가 minimal
+    if model.startswith("gemini-2.5"):
+        return {"thinkingBudget": 0}
+    return None                                 # 2.0 은 이 필드를 모른다
+
+
+def _call_gemini(model: str, api_key: str, prompt: str,
+                 thinking: bool = True) -> requests.Response:
     config = {
         "responseMimeType": "application/json",
         "responseSchema": SCHEMA,
     }
-    # 2.5 계열은 기본으로 '생각'을 하는데, 그 토큰이 출력 한도를 잡아먹어
-    # 본문이 비어서 돌아오는 경우가 있다. 요약 작업엔 필요 없으므로 끈다.
-    if model.startswith("gemini-2.5"):
-        config["thinkingConfig"] = {"thinkingBudget": 0}
+    if thinking:
+        tc = _thinking_config(model)
+        if tc:
+            config["thinkingConfig"] = tc
 
     return requests.post(
         f"{GEMINI_BASE}/models/{model}:generateContent",
@@ -231,17 +254,36 @@ def summarize(realty: list[dict], general: list[dict]) -> dict:
 
     errors = []
     for model in models:
-        print(f"[info] Gemini 호출: {model}")
-        r = _call_gemini(model, api_key, prompt)
+        for attempt in range(1, RETRIES_PER_MODEL + 1):
+            print(f"[info] Gemini 호출: {model} (시도 {attempt}/{RETRIES_PER_MODEL})")
+            r = _call_gemini(model, api_key, prompt)
 
-        if r.status_code in (404, 429):     # 모델 없음 / 한도 초과 → 다음 후보로
-            print(f"[warn] {model} HTTP {r.status_code}: {r.text[:400]}")
-            errors.append(f"{model}: HTTP {r.status_code} — {_error_message(r)}")
-            continue
-        if r.status_code >= 400:
-            raise SystemExit(f"[{model}] HTTP {r.status_code}: {r.text[:800]}")
+            if r.status_code == 404:        # 모델 없음 → 재시도 무의미, 다음 후보로
+                print(f"[warn] {model} HTTP 404: {r.text[:400]}")
+                errors.append(f"{model}: HTTP 404 — {_error_message(r)}")
+                break
 
-        return _extract_json(r.json(), model)
+            if r.status_code in RETRY_STATUSES:      # 혼잡/한도 → 잠시 뒤 재시도
+                print(f"[warn] {model} HTTP {r.status_code}: {r.text[:400]}")
+                if attempt == RETRIES_PER_MODEL:
+                    errors.append(
+                        f"{model}: HTTP {r.status_code} — {_error_message(r)}")
+                    break
+                wait = RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"[info] {wait}초 후 재시도")
+                time.sleep(wait)
+                continue
+
+            # thinkingConfig 형식이 세대마다 달라서, 이것 때문에 거절당한
+            # 거라면 그 설정만 빼고 한 번 더 시도해 본다.
+            if r.status_code == 400 and "thinking" in r.text.lower():
+                print(f"[warn] {model} thinkingConfig 거절 — 빼고 재시도")
+                r = _call_gemini(model, api_key, prompt, thinking=False)
+
+            if r.status_code >= 400:        # 그 밖의 오류는 고쳐야 할 문제
+                raise SystemExit(f"[{model}] HTTP {r.status_code}: {r.text[:800]}")
+
+            return _extract_json(r.json(), model)
 
     available = list_available_models(api_key)
     hint = ("\n사용 가능한 모델: " + ", ".join(available[:15])) if available else \
