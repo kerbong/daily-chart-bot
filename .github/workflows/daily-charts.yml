@@ -2,9 +2,11 @@ name: Daily Weekly Charts
 
 on:
   schedule:
-    # 한국시간(KST) 오전 6:30 = UTC 21:30 (전날)
+    # 한국시간(KST) 오전 5:13 = UTC 20:13 (전날). 차트 + 뉴스 둘 다.
     - cron: "13 20 * * *"
-  workflow_dispatch:   # 버튼으로 수동 실행도 가능
+    # 한국시간(KST) 오후 3:00 = UTC 06:00. 뉴스만 한 번 더.
+    - cron: "0 6 * * *"
+  workflow_dispatch:   # 버튼으로 수동 실행도 가능 (이때는 둘 다 보낸다)
 
 jobs:
   send-charts:
@@ -28,6 +30,8 @@ jobs:
         run: pip install yfinance matplotlib requests edge-tts
 
       - name: Generate and send charts
+        # 오후 3시 실행은 뉴스만 보내므로 이 단계를 건너뛴다.
+        if: github.event.schedule != '0 6 * * *'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
