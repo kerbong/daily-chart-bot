@@ -155,6 +155,7 @@ FALLBACK_MODELS = [
 RETRY_STATUSES = {429, 500, 502, 503}
 RETRIES_PER_MODEL = 3
 RETRY_BACKOFF = 20      # 초, 시도할 때마다 배로 늘린다
+GEMINI_READ_TIMEOUT = 120   # 초. 이보다 오래 끌면 붙잡고 있지 말고 다시 던진다
 
 
 def _error_message(r: requests.Response) -> str:
@@ -212,7 +213,7 @@ def _call_gemini(model: str, api_key: str, prompt: str,
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": config,
         },
-        timeout=180,
+        timeout=(15, GEMINI_READ_TIMEOUT),
     )
 
 
@@ -256,7 +257,20 @@ def summarize(realty: list[dict], general: list[dict]) -> dict:
     for model in models:
         for attempt in range(1, RETRIES_PER_MODEL + 1):
             print(f"[info] Gemini 호출: {model} (시도 {attempt}/{RETRIES_PER_MODEL})")
-            r = _call_gemini(model, api_key, prompt)
+            try:
+                r = _call_gemini(model, api_key, prompt)
+            except requests.RequestException as e:
+                # 타임아웃·연결 끊김 등 응답 자체를 못 받은 경우.
+                # 상태코드가 없으니 위 재시도 분기에 걸리지 않아 여기서 따로 처리한다.
+                reason = f"{type(e).__name__}: {e}"
+                print(f"[warn] {model} 응답 실패 — {reason}")
+                if attempt == RETRIES_PER_MODEL:
+                    errors.append(f"{model}: {reason}")
+                    break
+                wait = RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"[info] {wait}초 후 재시도")
+                time.sleep(wait)
+                continue
 
             if r.status_code == 404:        # 모델 없음 → 재시도 무의미, 다음 후보로
                 print(f"[warn] {model} HTTP 404: {r.text[:400]}")
@@ -278,7 +292,11 @@ def summarize(realty: list[dict], general: list[dict]) -> dict:
             # 거라면 그 설정만 빼고 한 번 더 시도해 본다.
             if r.status_code == 400 and "thinking" in r.text.lower():
                 print(f"[warn] {model} thinkingConfig 거절 — 빼고 재시도")
-                r = _call_gemini(model, api_key, prompt, thinking=False)
+                try:
+                    r = _call_gemini(model, api_key, prompt, thinking=False)
+                except requests.RequestException as e:
+                    errors.append(f"{model}: {type(e).__name__}: {e}")
+                    break
 
             if r.status_code >= 400:        # 그 밖의 오류는 고쳐야 할 문제
                 raise SystemExit(f"[{model}] HTTP {r.status_code}: {r.text[:800]}")
