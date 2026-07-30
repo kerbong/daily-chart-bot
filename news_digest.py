@@ -145,9 +145,9 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # 조건: 무료 티어가 있고, 긴 기사 묶음을 요약할 수 있는 텍스트 모델.
 # gemini-2.5-flash 는 신규 사용자에게 더 이상 제공되지 않아 뺐다(404).
 FALLBACK_MODELS = [
+    "gemini-3-flash-preview",   # 3.5-flash 가 타임아웃이 잦아 이쪽을 먼저 쓴다
     "gemini-3.5-flash",         # 무료 티어 + 검색 그라운딩 지원
     "gemini-3.1-flash-lite",    # 더 싸고 빠른 예비
-    "gemini-3-flash-preview",
     "gemini-2.5-flash-lite",    # 구세대 최후 보루
 ]
 
